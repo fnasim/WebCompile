@@ -12,10 +12,10 @@ This is my first program written in Go which compiles C# code (as a proof of con
 * http server listens to default port 8000 for compile requests
 
 ### Compilation
-* get handle of an available container and defer concurrent requests to destroy this container and create new
-* code POSTed is copied to a temporary folder in ./runs/ (already mounted on the container)
-* compilation and execution request are executed on the container
-* stdout and stderr are captured and returned to client as JSON response
+* get handle of an available container and defer concurrent requests to destroy this container and create new, the requester waits until a container is available
+* source code POSTed is copied to a temporary folder in ./runs/ (already mounted on the container)
+* code compilation and execution are executed on the container
+* stdout and stderr are captured and returned to client as JSON response (Output and ErrorString fields)
 * timeout can be set and in case of a timeout Timeout: true is returned as part of JSON response
 
 ### JSON response
@@ -33,7 +33,8 @@ This is my first program written in Go which compiles C# code (as a proof of con
 * Install docker (Mac is OK, use boot2docker)
 * Install docker image 'mono:latest'
 * Set up a directory 'runs' with write access
-* go build webcompile.go && ./webcompile.go (will need to "go get" a few packages)
+* Edit webcompile.go and set configuration 
+* go build webcompile.go && ./webcompile (will need to "go get" a few packages)
 
 ## Test
 
