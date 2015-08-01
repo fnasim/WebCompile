@@ -17,8 +17,6 @@ import (
 	"log"
 	"os/exec"
 	"os"
-	"os/signal"
-	"github.com/kjk/betterguid"
 	"time"
 	"encoding/json"
 	"fmt"
@@ -26,33 +24,6 @@ import (
 	"io/ioutil"
 	"github.com/fsouza/go-dockerclient"
 )
-
-// Configuration
-
-// # of concurrent containers to start
-const ConcurrentContainers = 5
-
-// docker image to use
-const DockerImage = "mono"
-
-// maximum code execution time
-const ExecutionTimeout = 5 * time.Second
-
-// limit code size
-const MaximumCodeSizeInBytes = 8 * 1024;
-
-// allow requests from other sites, empty to disable
-const CorsHeader = "*";
-
-// run the compile server on this port
-const Port = "8000";
-
-// command to run on the container to compile code
-const ShellCommand = "mcs -out:/home/code/code.exe /home/code/source/code.cs; startTime=$(date +%s%3N);  if [[ $? == 0 ]]; then  mono /home/code/code.exe; endTime=$(date +%s%3N); diff=$(($endTime-$startTime)); echo Code Execution: $diff ms; fi";
-
-// local path which is mounted on the docker image for writing code
-var PathForCodeStorage string // current working directoy or exact path, should be writable
-var PathSuffix = "runs";
 
 // globals
 var DockerClient *docker.Client
@@ -86,15 +57,16 @@ func compile(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", CorsHeader)
 	}
 	// language := r.PostFormValue("language")
+	language := "C#"
 	code := r.PostFormValue("code")
 
 	codeSize := len(code)
 	if(codeSize <= 0 || codeSize > MaximumCodeSizeInBytes) {
-		compileResponseError(w, "Code is malformed. May be max limit")
+		compileResponseError(w, "Code must be greater than 0 and less than max limit")
 		return
 	}
 
-	out, err, elapsed, timedOut := executeCodeOnDocker(code)
+	out, err, elapsed, timedOut := executeCodeOnDocker(language, code)
 
 	compileResponse(
 		w,
@@ -104,19 +76,29 @@ func compile(w http.ResponseWriter, r *http.Request) {
 		timedOut)
 }
 
-func executeCodeOnDocker(code string) (string, string, time.Duration, bool) {
-    // get a prepped container containers
+func stats(w http.ResponseWriter, r *http.Request) {
+	// TODO:
+	// server start date time
+	// graph of requests, languages, browser, country
+	// graph of docker latency, execution latency
+	// number of active containers
+	// # of errors and strings creating/deleting/executing containers
+	io.WriteString(w, "Not implemented yet")
+}
+
+
+func executeCodeOnDocker(language, code string) (string, string, time.Duration, bool) {
+    // get a prepped container
 	log.Print("Acquiring container")
 
-	containerInfo := <- AvailableContainers
-	containerId, runPath := containerInfo.ID, containerInfo.Path
+	container := <- AvailableContainers
 
 	defer func() {
 		go createNewContainer()
-		go destroyContainer(containerId, runPath)
+		go destroyContainer(container)
 	}()
 
-	codePath := runPath + "/code.cs"
+	codePath := container.Path + "/code.cs"
 
 	fo, err := os.Create(codePath)
 	if err != nil {
@@ -125,11 +107,11 @@ func executeCodeOnDocker(code string) (string, string, time.Duration, bool) {
 	fo.WriteString(code)
 	fo.Close()
 	
-	log.Print("Running container from path: " + runPath)
+	log.Print("Executing container from path: " + container.Path)
 	
 	startTime := time.Now()
 
-	args := []string { "exec", containerId, "/bin/bash", "-c", ShellCommand}
+	args := []string { "exec", container.ID, "/bin/bash", "-c", CommandMap[language]}
 	cmd := exec.Command("docker", args...)
 
 	stdin, _ := cmd.StdinPipe()
@@ -167,21 +149,27 @@ func executeCodeOnDocker(code string) (string, string, time.Duration, bool) {
 	return string(out), string(errout), elapsedTime, timedOut
 }
 
-func destroyContainer(containerId string, path string) {
-	log.Print("Destroy " + containerId)
-	err := DockerClient.KillContainer(docker.KillContainerOptions { ID: containerId })
+func destroyContainer(container ContainerInfo) {	
+	log.Print("Destroy " + container.ID)
+	err := DockerClient.KillContainer(docker.KillContainerOptions { ID: container.ID })
 	if err != nil {
 		log.Print("KillContainer: ", err)
 	}
-	err = DockerClient.RemoveContainer(docker.RemoveContainerOptions { ID: containerId })
+	err = DockerClient.RemoveContainer(docker.RemoveContainerOptions { ID: container.ID })
 	if err != nil {
 		log.Print("RemoveContainer: ", err)
 	}
-	os.RemoveAll(path)
+	os.RemoveAll(container.Path)
 }
 
 func createNewContainer() {
-	tmpPath := createTempPath()
+	tmpPath, err := createTempPath()
+
+	if err != nil {
+		log.Print("Cannot create temp path (", tmpPath, "): ", err)
+		return
+	}
+
 	cmd := "docker"
 	args := []string { "run", "-d", "-v", tmpPath + ":/home/code/source", "-t", DockerImage,"/bin/bash"}
 	
@@ -190,7 +178,7 @@ func createNewContainer() {
 	elapsedTime := time.Since(startTime)
 
 	if err != nil {
-		log.Print("CreateContainer: ", err)
+		log.Print("CreateContainer: ", out, err)
 		return
 	}
 	containerId := strings.TrimSpace(string(out))
@@ -225,21 +213,7 @@ func compileResponseError(w http.ResponseWriter, error string) {
     io.WriteString(w, response)
 }
 
-func main() {
-
-	log.Print("Starting up")
-
-	AvailableContainers = make(chan ContainerInfo, ConcurrentContainers)
-
-	pwd, err := os.Getwd()
-
-	if err != nil {
-		log.Fatal("Cannot get present directory")
-		return
-	}
-
-	PathForCodeStorage = pwd + "/" + PathSuffix
-
+func InitializeDocker() {
 	client, err := docker.NewClientFromEnv()
 	if err != nil {
 		log.Fatal("Cannot create docker client: ", err)
@@ -249,13 +223,15 @@ func main() {
 
 	imgs, err := client.ListImages(docker.ListImagesOptions{ All: false })
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("Error on listing docker images", err)
 	}
+
+	// list images
 	for _, img := range imgs {
 		log.Print(fmt.Sprintf("[ID %s] [Name %s]", img.ID, img.RepoTags))
 	}
 
-	// list of running containers
+	// list running containers
 	containers, err :=  client.ListContainers(docker.ListContainersOptions {All: false})
 	for _, container := range containers {
 		log.Print(fmt.Sprintf("[ID %s] [Image %s] [Command %s]", container.ID, container.Image, container.Command))
@@ -264,70 +240,43 @@ func main() {
 	for i := 0; i < ConcurrentContainers; i++ {
 		go createNewContainer()
 	}
-	defer destroyContainers()
+}
 
+func StartWebServer() {
 	log.Print("Path for new folders: " + PathForCodeStorage)
 	log.Print("Listening on " + Port)
-
-	sig := make(chan os.Signal, 1)
-  	signal.Notify(sig, os.Interrupt)
-  	go func() {
-    	<-sig
-    	log.Print("BYE")
-    	destroyContainers()
-    	os.Exit(0)
-  	}()
 
 	mux := http.NewServeMux();
 	mux.HandleFunc("/", start)
 	mux.HandleFunc("/compile", compile)
 
-	err = http.ListenAndServe(":" + Port, mux)
+	if(EnableStatsEndpoint) {
+		mux.HandleFunc("/stats", stats)
+	}
+
+	err := http.ListenAndServe(":" + Port, mux)
 	
 	if err != nil {
 		log.Fatal("ListenAndServe failed: ", err)
 	}
 }
 
-func destroyContainers() {
+func Shutdown() {
+	log.Print("BYE!")
 	close(AvailableContainers)
 
 	// destroy all active containers
-	for containerInfo := range AvailableContainers {
-		destroyContainer(containerInfo.ID, containerInfo.Path)
+	for container := range AvailableContainers {
+		destroyContainer(container)
 	}
 }
 
-func createTempPath() string {
-	uuid := betterguid.New()
-	date := time.Now().Format("2006-01-15")
-	runPath := PathForCodeStorage + "/" + date + uuid
+func main() {
+	log.Print("Starting up")
+	defer Shutdown()
 
-	err := os.Mkdir(runPath, 0777)
-	if err != nil {
-		log.Print("Could not create temporary path: ", runPath)
-		log.Print(err)
-		return ""
-	}
-
-	return runPath
-}
-
-func cp(dst, src string) error {
-	s, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	// no need to check errors on read only file, we already got everything
-	// we need from the filesystem, so nothing can go wrong now.
-	defer s.Close()
-	d, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(d, s); err != nil {
-		d.Close()
-		return err
-	}
-	return d.Close()
+	HandleOSInterrupt(Shutdown)
+	InitializeConfig()
+	InitializeDocker()
+	StartWebServer()
 }

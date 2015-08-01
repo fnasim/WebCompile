@@ -32,9 +32,10 @@ This is my first program written in Go which compiles C# code (as a proof of con
 * Install Go 1.4+
 * Install docker (Mac is OK, use boot2docker)
 * Install docker image 'mono:latest'
-* Set up a directory 'runs' with write access
-* Edit webcompile.go and set configuration 
-* go build webcompile.go && ./webcompile (will need to "go get" a few packages)
+* Create new a directory 'runs' with write access
+* Edit config.go and set configuration options
+* go build -o webcompile *.go (will need to "go get" a few packages)
+* ./webcompile
 
 ## Test
 
@@ -52,3 +53,6 @@ http://localhost:8000/
 * fault tolerance to recover after errors creating docker containers
 * add tests, do scale testing
 * use [bocker](https://github.com/p8952/bocker) instead of docker? :)
+* time out if cannot acquire container
+* if client cancels request, cancel wait/execution gracefully
+* collect stats and optionally expose them on /stats
